@@ -9,6 +9,7 @@ from __future__ import annotations
 import csv
 import hashlib
 import json
+import os
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
@@ -149,6 +150,57 @@ def prepare(release, mapped: list[dict], geo: dict, client, bucket: str,
     return plan
 
 
+def _backup_existing_objects(plan: dict, client, bucket: str, audit: dict, save, log, stop):
+    """Create and verify a full recoverable snapshot before any in-place overwrite.
+
+    Backups are retained in R2. A failure during this phase aborts publication;
+    no production keys are modified. The local audit maps each source to its backup.
+    """
+    changes = [op for op in plan['operations'] if op['action'] == 'REPLACE']
+    audit['backup_state'] = 'in_progress'
+    audit['backup_total'] = len(changes)
+    save()
+    prefix = DATASET + '/_publication_backups/' + plan['operation_id'] + '/'
+    for index, op in enumerate(changes, 1):
+        if stop.is_set():
+            raise RuntimeError('Stopped during backup. No production object was overwritten.')
+        source_key = op['key']
+        if not source_key.startswith(DATASET + '/') or '..' in source_key:
+            raise RuntimeError(f'Unsafe original object key: {source_key}')
+        backup_key = prefix + source_key[len(DATASET) + 1:]
+        current = _r2_head(client, bucket, source_key)
+        if current is None or str(current.get('ETag', '')).strip('"') != op['old_etag']:
+            raise RuntimeError(f'Original R2 object changed before backup: {source_key}')
+        if _r2_head(client, bucket, backup_key) is not None:
+            raise RuntimeError(f'Backup destination unexpectedly exists: {backup_key}')
+        client.copy_object(Bucket=bucket, Key=backup_key,
+                           CopySource={'Bucket': bucket, 'Key': source_key})
+        copied = _r2_head(client, bucket, backup_key)
+        if copied is None or copied.get('ContentLength') != current.get('ContentLength'):
+            raise RuntimeError(f'R2 backup size verification failed: {backup_key}')
+        # Hash the actual backed-up bytes, not just copied (potentially stale) metadata.
+        stream = client.get_object(Bucket=bucket, Key=backup_key)['Body']
+        digest = hashlib.sha256()
+        try:
+            for block in iter(lambda: stream.read(1024 * 1024), b''):
+                digest.update(block)
+        finally:
+            stream.close()
+        if digest.hexdigest() != op['old_sha256']:
+            raise RuntimeError(f'R2 backup contents differ from preview: {backup_key}')
+        audit['backups'].append({
+            'original_key': source_key, 'backup_key': backup_key,
+            'sha256': op['old_sha256'], 'bytes': copied['ContentLength'],
+            'original_etag': op['old_etag'],
+        })
+        save()
+        if index % 30 == 0 or index == len(changes):
+            log(f'Backed up and verified {index}/{len(changes)} existing R2 objects')
+    audit['backup_state'] = 'complete'
+    save()
+    log('Full R2 backup verified. No existing objects have been overwritten yet.')
+
+
 def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
             report_dir: Path, log, stop) -> dict:
     # The user has already confirmed the exact plan in the graphical interface.
@@ -159,12 +211,20 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
     operations=plan['operations']
     started = datetime.now(timezone.utc).isoformat()
     audit={'operation_id':plan['operation_id'],'started_utc':started,
-           'complete':False,'files':[],'database_result':None}
+           'complete':False,'files':[],'backups':[], 'backup_state':'not_started',
+           'database_result':None}
     audit_file=report_dir / 'publication_run.json'
     def save():
-        audit_file.write_text(json.dumps(audit,indent=2,ensure_ascii=False),encoding='utf-8')
+        # Atomic local audit replacement avoids a truncated recovery manifest.
+        temporary = audit_file.with_suffix('.json.tmp')
+        with temporary.open('w', encoding='utf-8') as stream:
+            json.dump(audit, stream, indent=2, ensure_ascii=False)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, audit_file)
     save()
     try:
+        _backup_existing_objects(plan, client, bucket, audit, save, log, stop)
         for index, op in enumerate(operations,1):
             if stop.is_set():
                 raise RuntimeError('Stopped; database publication not attempted. Some uploads may exist.')
@@ -205,5 +265,13 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
         log('PUBLISHED to read-only collection inventory. Checkout and Prodigi remain blocked.')
         return result
     except Exception:
+        # Restore requirements are explicit: only completed overwrites need recovery.
+        # Never auto-restore while a concurrent writer might be active.
+        audit['restore_needed'] = [
+            {'original_key': row['key'],
+             'backup_key': next((b['backup_key'] for b in audit['backups']
+                 if b['original_key'] == row['key']), None)}
+            for row in audit['files'] if row['status'] == 'REPLACE'
+        ]
         save()
         raise
