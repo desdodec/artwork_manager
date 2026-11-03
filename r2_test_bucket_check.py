@@ -2,8 +2,8 @@
 
 Run: python r2_test_bucket_check.py
 
-Uses existing Windows Credential Manager R2 credentials, but ignores the saved
-production bucket name. Reads only the fixed test bucket. No object writes.
+Uses separate test credentials in Windows Credential Manager. Reads only the
+fixed test bucket. No object writes.
 """
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import sys
 TEST_BUCKET = "street-face-integration-tests"
 PRODUCTION_BUCKET = "mug-print-assets"
 TEST_ROOT = "street-face-integration-tests/v1/"
-SERVICE = "street-face-artwork-manager"
+from r2_test_credentials import TEST_SERVICE
 
 
 def check_test_bucket(client, bucket: str = TEST_BUCKET) -> dict:
@@ -37,11 +37,11 @@ def check_test_bucket(client, bucket: str = TEST_BUCKET) -> dict:
 def main() -> int:
     import boto3
     import keyring
-    account = keyring.get_password(SERVICE, "account")
-    access = keyring.get_password(SERVICE, "access")
-    secret = keyring.get_password(SERVICE, "secret")
+    account = keyring.get_password(TEST_SERVICE, "account")
+    access = keyring.get_password(TEST_SERVICE, "access")
+    secret = keyring.get_password(TEST_SERVICE, "secret")
     if not all((account, access, secret)):
-        print("Missing saved R2 credentials. Load or save them in Artwork Manager.", file=sys.stderr)
+        print("Missing dedicated R2 test credentials. Run python r2_test_credentials.py first.", file=sys.stderr)
         return 1
     client = boto3.client(
         "s3", region_name="auto",
@@ -53,7 +53,7 @@ def main() -> int:
     except Exception as exc:
         # Don't print raw SDK errors: they can include sensitive request details.
         print(f"Read-only test bucket check failed: {type(exc).__name__}. "
-              "Existing credentials may not have access to the new bucket.", file=sys.stderr)
+              "Dedicated test credentials may not have access to the test bucket.", file=sys.stderr)
         return 1
     print(f"TEST BUCKET: {result['bucket']}")
     print("ACCESSIBLE: YES")
