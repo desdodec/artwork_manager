@@ -28,6 +28,7 @@ from replacement import prepare as prepare_replacement, apply as apply_replaceme
 from publisher import DEFAULT_ENDPOINT, DATASET, _api, prepare as prepare_publication, publish as apply_publication
 from production_report import read_production_report, ProductionReportError
 from recovery_assessment import assess_recovery, format_assessment
+from remote_recovery_verification import verify_remote_backups, format_remote_verification
 
 SERVICE = "street-face-artwork-manager"
 FILE_RE = re.compile(r"^(?P<number>\d{4})_(?P<street>.+?)_wrap_print(?P<side>_front|_rear)?\.(?P<ext>png|svg)$", re.I)
@@ -328,6 +329,8 @@ class App(tk.Tk):
         self.preflight_button.pack(side="left", padx=4)
         ttk.Button(actions, text="Assess Recovery Audit (read-only)",
                    command=self._assess_recovery).pack(side="left", padx=4)
+        ttk.Button(content, text="Verify R2 Recovery Backups (read-only)",
+                   command=self._verify_recovery_remote).pack(anchor="w", padx=8, pady=3)
         publish_modes = ttk.LabelFrame(content, text="Publish Collection — held designs only")
         publish_modes.pack(fill="x", pady=(6, 4))
         ttk.Radiobutton(publish_modes, text="Partial update — keep other streets listed",
@@ -617,6 +620,40 @@ class App(tk.Tk):
             names = "\n".join(x['key'] for x in changed[:15])
             extra = f"\n... and {len(changed)-15} more" if len(changed)>15 else ""
             self.events.put(("confirm_replace", (client, bucket, operations, report_dir, names+extra)))
+        self._work(work)
+
+    def _verify_recovery_remote(self):
+        """Explicit user-initiated R2 backup byte reads; never writes or restores."""
+        chosen = filedialog.askopenfilename(
+            title="Select saved publication_run_<operation_id>.json audit",
+            filetypes=[("Publication audit", "publication_run_*.json"), ("JSON files", "*.json")])
+        if not chosen:
+            return
+        account, bucket, access, secret = (x.get().strip() for x in
+                                          (self.account, self.bucket, self.access, self.secret))
+        if not all((account, bucket, access, secret)):
+            messagebox.showerror("R2 connection missing",
+                                 "Load your R2 credentials and bucket name first.")
+            return
+        if bucket != "mug-print-assets":
+            messagebox.showerror("Unexpected R2 bucket",
+                                 "Recovery verification is restricted to the Hebden Bridge production bucket.")
+            return
+        if not messagebox.askyesno(
+            "READ-ONLY R2 verification",
+            "Read backed-up R2 objects in mug-print-assets and verify their real bytes "
+            "against the selected journal?\n\n"
+            "No uploads, restores, deletions or database changes will occur."):
+            return
+        def work():
+            client = make_client(account, access, secret)
+            result = verify_remote_backups(Path(chosen), client, bucket)
+            for line in format_remote_verification(result).splitlines():
+                self.events.put(("log", line))
+            if not result["all_recorded_backups_verified"]:
+                self.events.put(("log",
+                    "WARNING: One or more recorded backups could not be verified. "
+                    "Do not attempt restoration."))
         self._work(work)
 
     def _assess_recovery(self):
