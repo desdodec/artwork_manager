@@ -26,6 +26,7 @@ from geography import validate_geography, enrich_postcode_report, write_geograph
 from print_validation import audit_release
 from replacement import prepare as prepare_replacement, apply as apply_replacement
 from publisher import DEFAULT_ENDPOINT, prepare as prepare_publication, publish as apply_publication
+from production_report import read_production_report, ProductionReportError
 
 SERVICE = "street-face-artwork-manager"
 FILE_RE = re.compile(r"^(?P<number>\d{4})_(?P<street>.+?)_wrap_print(?P<side>_front|_rear)?\.(?P<ext>png|svg)$", re.I)
@@ -470,6 +471,41 @@ class App(tk.Tk):
             release.issues.extend(geo_issues)
             if not geo_issues and len(mapped) == len(release.rows):
                 release.rows = mapped
+
+            # Generator selection is authoritative. A complete release may omit
+            # deliberately excluded designs; don't infer exclusion from filenames.
+            # Check the written street_keys against the validated geography before
+            # permitting any R2 upload or catalogue modification.
+            release.production_report = None
+            report_candidates = [
+                source / "print_report.json",
+                source / "reports" / "print_report.json",
+                source.parent / "print_report.json",
+            ]
+            report_path = next((path for path in report_candidates if path.is_file()), None)
+            if report_path is not None:
+                try:
+                    selection = read_production_report(report_path)
+                    expected_keys = set(selection["selected_keys"])
+                    actual_keys = {row.get("street_key") for row in mapped}
+                    if len(actual_keys) != len(mapped) or expected_keys != actual_keys:
+                        missing = expected_keys - actual_keys
+                        unexpected = actual_keys - expected_keys
+                        raise ProductionReportError(
+                            f"Generator report differs from validated artwork: "
+                            f"{len(missing)} missing, {len(unexpected)} unexpected street_keys"
+                        )
+                    release.production_report = selection
+                    self.events.put(("log", f"Generator report confirmed: "
+                        f"{selection['processed']} processed, "
+                        f"{selection['written']} production designs, "
+                        f"{selection['excluded']} explicitly not for production."))
+                except (ValueError, KeyError, OSError) as error:
+                    release.issues.append(f"Generator print_report.json: {error}")
+            else:
+                self.events.put(("log", "No print_report.json found beside this production run. "
+                    "Artwork validation uses filenames and geography only."))
+
             report_dir = source.parent / "artwork_reports" / f"{area}-{version}"
             manifest = write_report(release, report_dir)
             write_geography_reports(mapped, geo_issues, geo, report_dir)
@@ -651,10 +687,15 @@ class App(tk.Tk):
                     plan=value[0]
                     summary=plan['summary']
                     excluded=len(plan['excluded_keys'])
+                    generator_report=getattr(self.release, 'production_report', None)
+                    generator_line=(f"Generator marked NOT FOR PRODUCTION: "
+                        f"{generator_report['excluded']}\\n" if generator_report else
+                        "Generator exclusion report: not found\\n")
                     approved=messagebox.askyesno(
                         "FINAL CONFIRMATION — PUBLISH COLLECTION",
                         f"Mode: {plan['mode'].upper()}\n"
                         f"Designs in this folder: {plan['design_count']}\n"
+                        f"{generator_line}"
                         f"New R2 files: {summary.get('NEW',0)}\n"
                         f"Changed R2 files: {summary.get('REPLACE',0)}\n"
                         f"Unchanged R2 files: {summary.get('SAME',0)}\n"
