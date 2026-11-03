@@ -689,8 +689,8 @@ class App(tk.Tk):
                     excluded=len(plan['excluded_keys'])
                     generator_report=getattr(self.release, 'production_report', None)
                     generator_line=(f"Generator marked NOT FOR PRODUCTION: "
-                        f"{generator_report['excluded']}\\n" if generator_report else
-                        "Generator exclusion report: not found\\n")
+                        f"{generator_report['excluded']}\n" if generator_report else
+                        "Generator exclusion report: not found\n")
                     approved=messagebox.askyesno(
                         "FINAL CONFIRMATION — PUBLISH COLLECTION",
                         f"Mode: {plan['mode'].upper()}\n"
