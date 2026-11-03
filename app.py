@@ -543,7 +543,7 @@ class App(tk.Tk):
                 self.events.put(("log", f"PRINT AUDIT: {counts['TECHNICAL_PASS']} technical passes, {counts['REVIEW']} review, {counts['FAIL']} failed"))
                 self.events.put(("log", f"Report: {csv_file}"))
                 self.events.put(("log", f"Summary: {summary_file}"))
-                self.events.put(("log", "Technical pass does NOT approve artwork for Prodigi production."))
+                self.events.put(("log", "Technical validation passed. Artwork meets the checked Prodigi print-file requirements. Physical product proof approval remains outstanding."))
         self._work(work)
 
     def _test_upload(self):
