@@ -479,6 +479,7 @@ class App(tk.Tk):
             release.production_report = None
             report_candidates = [
                 source / "print_report.json",
+                source / "print_candidates" / "print_report.json",
                 source / "reports" / "print_report.json",
                 source.parent / "print_report.json",
             ]
