@@ -161,7 +161,7 @@ def verify_remote_backups(audit_path: Path, client, bucket: str) -> dict:
             "actual_sha256": actual_sha, "expected_bytes": expected_size,
             "actual_bytes": actual_size, "detail": detail,
         })
-    all_verified = len(checks) == len(records) and all(
+    all_verified = bool(records) and len(checks) == len(records) and all(
         row["status"] == "verified" for row in checks
     )
     return {
