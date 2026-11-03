@@ -16,6 +16,11 @@ from test_publisher_backup import PublishRecoveryTests, SimulatedCrash
 class PublicationFailureAuditTests(PublishRecoveryTests):
     """Reuse the tested two-object R2 simulator and real publisher."""
 
+    # Prevent inherited test duplication when both suites are invoked.
+    test_upload_failure_after_second_mutation_records_both = None
+    test_unexpected_crash_preserves_prewrite_intent = None
+    test_database_rejection_after_uploads_records_recovery = None
+
     def _assessment(self):
         path = self.folder / ("publication_run_" + self.plan["operation_id"] + ".json")
         return assess_recovery(path)
@@ -99,14 +104,6 @@ class PublicationFailureAuditTests(PublishRecoveryTests):
         self.assertEqual(self.r2.objects[self.keys[1]], self.old[1])
         self.assertEqual(assessment["state"], "no_recorded_overwrites")
         self.assertEqual(assessment["completed_replacements"], 0)
-
-
-# Avoid inheriting and rerunning the parent suite's three test methods.
-for _name in list(vars(PublicationFailureAuditTests)):
-    pass
-for _name in dir(PublishRecoveryTests):
-    if _name.startswith("test_"):
-        setattr(PublicationFailureAuditTests, _name, None)
 
 
 if __name__ == "__main__":
