@@ -25,7 +25,7 @@ import keyring
 from geography import validate_geography, enrich_postcode_report, write_geography_reports
 from print_validation import audit_release
 from replacement import prepare as prepare_replacement, apply as apply_replacement
-from publisher import DEFAULT_ENDPOINT, prepare as prepare_publication, publish as apply_publication
+from publisher import DEFAULT_ENDPOINT, DATASET, _api, prepare as prepare_publication, publish as apply_publication
 from production_report import read_production_report, ProductionReportError
 
 SERVICE = "street-face-artwork-manager"
@@ -323,6 +323,8 @@ class App(tk.Tk):
         # Legacy raw upload deliberately hidden to avoid bypassing Supabase sync.
         self.replace_button = ttk.Button(actions, text="Replace Changed Artwork", command=self._replace, state="disabled")
         # Legacy raw replacement deliberately hidden; Publish handles sync.
+        self.preflight_button = ttk.Button(actions, text="Check Supabase Safety (read-only)", command=self._preflight)
+        self.preflight_button.pack(side="left", padx=4)
         publish_modes = ttk.LabelFrame(content, text="Publish Collection — held designs only")
         publish_modes.pack(fill="x", pady=(6, 4))
         ttk.Radiobutton(publish_modes, text="Partial update — keep other streets listed",
@@ -426,6 +428,7 @@ class App(tk.Tk):
         self.test_button.configure(state="disabled")
         self.print_button.configure(state="disabled")
         self.publish_button.configure(state="disabled")
+        self.preflight_button.configure(state="disabled")
         self.cancel.clear()
         self.progress.start(10)
         def runner():
@@ -613,6 +616,31 @@ class App(tk.Tk):
             self.events.put(("confirm_replace", (client, bucket, operations, report_dir, names+extra)))
         self._work(work)
 
+    def _preflight(self):
+        """Read only the held-catalogue safety state; never upload or publish."""
+        endpoint = self.publish_endpoint.get().strip()
+        token = self.publish_token.get().strip()
+        if not endpoint or len(token) < 32:
+            messagebox.showwarning("Missing publishing credentials",
+                "Load your saved publishing token and check the endpoint first.")
+            return
+        def work():
+            response = _api(endpoint, token, {"mode": "preflight", "dataset_id": DATASET})
+            listed = response.get("currently_listed_keys")
+            if not isinstance(listed, list):
+                raise RuntimeError("Preflight response omitted currently_listed_keys")
+            self.events.put(("log",
+                "READ-ONLY SUPABASE PREFLIGHT: "
+                f"safe_to_upload={response.get('safe_to_upload')}; "
+                f"existing_held_designs={response.get('existing_held_designs')}; "
+                f"checkout_order_lines={response.get('checkout_order_lines')}; "
+                f"currently_listed={len(listed)}. "
+                "No R2 uploads or database changes requested."))
+            self.events.put(("log",
+                "NOTE: checkout_enabled and prodigi_enabled in this API response "
+                "are fixed assertions, not independently verified operational states."))
+        self._work(work)
+
     def _publish_plan(self):
         if self.release is None or self.release.issues or not self.mapped_geography:
             messagebox.showwarning("Validate first", "Validate the selected production folder and geography first.")
@@ -722,6 +750,7 @@ class App(tk.Tk):
                     self.print_button.configure(state=state)
                     self.replace_button.configure(state=state)
                     self.publish_button.configure(state=state)
+                    self.preflight_button.configure(state="normal")
         except queue.Empty:
             pass
         self.after(150, self._poll)
