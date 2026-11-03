@@ -213,7 +213,7 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
     audit={'operation_id':plan['operation_id'],'started_utc':started,
            'complete':False,'files':[],'backups':[], 'backup_state':'not_started',
            'database_result':None}
-    audit_file=report_dir / 'publication_run.json'
+    audit_file=report_dir / ('publication_run_' + plan['operation_id'] + '.json')
     def save():
         # Atomic local audit replacement avoids a truncated recovery manifest.
         temporary = audit_file.with_suffix('.json.tmp')
@@ -270,7 +270,7 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
         audit['complete']=result.get('db_result',{}).get('status') in ('published','already_published')
         save()
         if not audit['complete']:
-            raise RuntimeError('Catalogue did not confirm publication. Inspect publication_run.json')
+            raise RuntimeError(f'Catalogue did not confirm publication. Inspect {audit_file.name}')
         log('PUBLISHED to read-only collection inventory. Checkout and Prodigi remain blocked.')
         return result
     except Exception:
