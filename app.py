@@ -27,6 +27,7 @@ from print_validation import audit_release
 from replacement import prepare as prepare_replacement, apply as apply_replacement
 from publisher import DEFAULT_ENDPOINT, DATASET, _api, prepare as prepare_publication, publish as apply_publication
 from production_report import read_production_report, ProductionReportError
+from recovery_assessment import assess_recovery, format_assessment
 
 SERVICE = "street-face-artwork-manager"
 FILE_RE = re.compile(r"^(?P<number>\d{4})_(?P<street>.+?)_wrap_print(?P<side>_front|_rear)?\.(?P<ext>png|svg)$", re.I)
@@ -325,6 +326,8 @@ class App(tk.Tk):
         # Legacy raw replacement deliberately hidden; Publish handles sync.
         self.preflight_button = ttk.Button(actions, text="Check Supabase Safety (read-only)", command=self._preflight)
         self.preflight_button.pack(side="left", padx=4)
+        ttk.Button(actions, text="Assess Recovery Audit (read-only)",
+                   command=self._assess_recovery).pack(side="left", padx=4)
         publish_modes = ttk.LabelFrame(content, text="Publish Collection — held designs only")
         publish_modes.pack(fill="x", pady=(6, 4))
         ttk.Radiobutton(publish_modes, text="Partial update — keep other streets listed",
@@ -615,6 +618,24 @@ class App(tk.Tk):
             extra = f"\n... and {len(changed)-15} more" if len(changed)>15 else ""
             self.events.put(("confirm_replace", (client, bucket, operations, report_dir, names+extra)))
         self._work(work)
+
+    def _assess_recovery(self):
+        """Inspect a local publication journal; do not contact R2 or Supabase."""
+        chosen = filedialog.askopenfilename(
+            title="Select publication_run_<operation_id>.json audit",
+            filetypes=[("Publication audit", "publication_run_*.json"), ("JSON files", "*.json")])
+        if not chosen:
+            return
+        try:
+            result = assess_recovery(Path(chosen))
+            for line in format_assessment(result).splitlines():
+                self._log(line)
+            if result["missing_backup_keys"] or result["concerns"]:
+                messagebox.showwarning("Recovery audit requires attention",
+                    "The local recovery journal has missing or inconsistent records. "
+                    "Review the log. No recovery actions were attempted.")
+        except Exception as exc:
+            messagebox.showerror("Recovery assessment failed", str(exc))
 
     def _preflight(self):
         """Read only the held-catalogue safety state; never upload or publish."""
