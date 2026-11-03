@@ -237,6 +237,14 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
                     raise RuntimeError(f'New destination unexpectedly exists: {key}')
             elif old is None or str(old.get('ETag','')).strip('"')!=op['old_etag']:
                 raise RuntimeError(f'R2 changed since preview: {key}')
+            if op['action']=='REPLACE':
+                # Persist intent first: a crash during upload still appears in recovery.
+                backup = next((b for b in audit['backups'] if b['original_key'] == key), None)
+                if backup is None:
+                    raise RuntimeError(f'No verified backup for overwrite: {key}')
+                audit['overwrite_in_progress'] = {'original_key': key,
+                                                   'backup_key': backup['backup_key']}
+                save()
             if op['action']!='SAME':
                 client.upload_file(str(source),bucket,key,ExtraArgs={
                     'ContentType': 'image/svg+xml' if source.suffix.lower()=='.svg' else 'image/png',
@@ -248,6 +256,7 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
                 raise RuntimeError(f'Upload verification failed: {key}')
             audit['files'].append({'key':key,'status':op['action'],'bytes':op['local_bytes'],
                                    'etag':str(after.get('ETag','')).strip('"')})
+            audit.pop('overwrite_in_progress', None)
             save()
             if index%30==0 or index==len(operations):
                 log(f'Verified R2 {index}/{len(operations)} objects')
@@ -273,5 +282,8 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
                  if b['original_key'] == row['key']), None)}
             for row in audit['files'] if row['status'] == 'REPLACE'
         ]
+        if audit.get('overwrite_in_progress') and \
+                audit['overwrite_in_progress'] not in audit['restore_needed']:
+            audit['restore_needed'].append(audit['overwrite_in_progress'])
         save()
         raise
