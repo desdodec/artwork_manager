@@ -10,10 +10,10 @@ import json
 from unittest.mock import patch
 
 from recovery_assessment import assess_recovery
-from test_publisher_backup import PublishRecoveryTests, SimulatedCrash
+import test_publisher_backup as backup_tests
 
 
-class PublicationFailureAuditTests(PublishRecoveryTests):
+class PublicationFailureAuditTests(backup_tests.PublishRecoveryTests):
     """Reuse the tested two-object R2 simulator and real publisher."""
 
     # Prevent inherited test duplication when both suites are invoked.
@@ -67,7 +67,7 @@ class PublicationFailureAuditTests(PublishRecoveryTests):
     def test_abrupt_crash_is_detected_even_without_restore_needed(self):
         self.r2.crash_at = 1
         with patch("publisher._api", side_effect=self.fake_api):
-            with self.assertRaises(SimulatedCrash):
+            with self.assertRaises(backup_tests.SimulatedCrash):
                 self.run_publish()
         assessment = self._assessment()
         self.assertEqual(assessment["state"], "manual_reconciliation_required")
