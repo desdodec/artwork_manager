@@ -38,8 +38,11 @@ class MemoryR2:
         value = self.objects[original]
         self.objects[Key] = (b"X" * len(value)) if self.corrupt_copies else value
 
-    def get_object(self, Bucket, Key):
-        return {"Body": io.BytesIO(self.objects[Key])}
+    def get_object(self, Bucket, Key, IfMatch=None):
+        head = self.head_object(Bucket, Key)
+        if IfMatch is not None:
+            assert IfMatch == head['ETag']
+        return {**head, "Body": io.BytesIO(self.objects[Key])}
 
 
 class BackupTests(unittest.TestCase):

@@ -3,6 +3,7 @@
 // Deploy with legacy JWT verification OFF, behind STREET_FACE_PUBLISH_TOKEN.
 import { createClient } from 'npm:@supabase/supabase-js@2';
 import { S3Client, HeadObjectCommand } from 'npm:@aws-sdk/client-s3@3';
+import { verifyArtwork } from './collection-artwork-verification.mjs';
 
 const DATASET = 'street-face/hebden-bridge/v2';
 const PREFIX = 'street-face/hebden-bridge/v2/';
@@ -22,8 +23,9 @@ type Art = {
   street_key:string; street_name:string; postcode_district:string;
   geometry:{type:string;coordinates:unknown};
   front_key:string; rear_key:string; production_key:string;svg_key:string;
-  front_size?:number;rear_size?:number;production_size?:number;
-  front_etag?:string;rear_etag?:string;production_etag?:string;
+  front_size?:number;rear_size?:number;production_size?:number;svg_size?:number;
+  front_sha256?:string;rear_sha256?:string;production_sha256?:string;svg_sha256?:string;
+  front_etag?:string;rear_etag?:string;production_etag?:string;svg_etag?:string;
 };
 Deno.serve(async request => {
   if(request.method!=='POST') return json(405,{error:'POST required'});
@@ -93,23 +95,8 @@ Deno.serve(async request => {
     credentials:{accessKeyId:Deno.env.get('R2_ACCESS_KEY_ID')!,
       secretAccessKey:Deno.env.get('R2_SECRET_ACCESS_KEY')!},maxAttempts:2});
   const bucket=Deno.env.get('R2_BUCKET')!;
-  const failures:Array<{street_key:string;kind:string}>=[];
-  for(let start=0;start<checks.length;start+=20) {
-    const batch=await Promise.all(checks.slice(start,start+20).map(async check=>{
-      try {
-        const head=await r2.send(new HeadObjectCommand({Bucket:bucket,Key:check.key}));
-        const etag=(head.ETag??'').replace(/^"|"$/g,'');
-        if(!head.ContentLength||head.ContentLength<100||!/^[A-Za-z0-9_-]{8,128}$/.test(etag))
-          return {street_key:check.item.street_key,kind:check.field};
-        if(check.field!=='svg') {
-          (check.item as unknown as Record<string,unknown>)[check.field+'_size']=head.ContentLength;
-          (check.item as unknown as Record<string,unknown>)[check.field+'_etag']=etag;
-        }
-        return null;
-      }catch{return {street_key:check.item.street_key,kind:check.field};}
-    }));
-    for(const error of batch) if(error) failures.push(error);
-  }
+  const failures=await verifyArtwork(checks, (key:string) =>
+    r2.send(new HeadObjectCommand({Bucket:bucket,Key:key})));
   if(failures.length) return json(409,{error:'R2 verification failed, Supabase unchanged',
     count:failures.length,first_failures:failures.slice(0,20)});
   const {data,error}=await db.rpc('street_face_publish_held_v2',{

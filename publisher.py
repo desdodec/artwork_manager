@@ -10,6 +10,7 @@ import csv
 import hashlib
 import json
 import os
+import re
 import uuid
 from collections import Counter
 from datetime import datetime, timezone
@@ -66,6 +67,38 @@ def _remote_sha(client, bucket: str, key: str, head) -> str:
     for block in iter(lambda: stream.read(1024 * 1024), b''):
         h.update(block)
     return h.hexdigest()
+
+
+def _verify_artwork(client, bucket, op, head, stop):
+    """Hash actual bytes, binding the stream to the observed object version."""
+    key = op['key']
+    etag = str((head or {}).get('ETag', '')).strip('"')
+    if head is None or head.get('ContentLength') != op['local_bytes'] or not re.fullmatch(
+            r'[A-Za-z0-9_-]{8,128}', etag):
+        raise RuntimeError(f'Upload verification failed: {key}')
+    response = client.get_object(Bucket=bucket, Key=key, IfMatch=head['ETag'])
+    stream = response['Body']
+    digest = hashlib.sha256()
+    size = 0
+    try:
+        if response.get('ContentLength') != op['local_bytes'] or \
+                str(response.get('ETag', '')).strip('"') != etag:
+            raise RuntimeError(f'Upload verification failed: {key}')
+        while True:
+            if stop.is_set():
+                raise RuntimeError('Stopped during verification; database publication not attempted.')
+            block = stream.read(1024 * 1024)
+            if not block:
+                break
+            digest.update(block)
+            size += len(block)
+        if stop.is_set():
+            raise RuntimeError('Stopped during verification; database publication not attempted.')
+        if size != op['local_bytes'] or digest.hexdigest() != op['local_sha256']:
+            raise RuntimeError(f'Upload verification failed: {key}')
+    finally:
+        stream.close()
+    return {'bytes': size, 'sha256': digest.hexdigest(), 'etag': etag}
 
 
 def prepare(release, mapped: list[dict], geo: dict, client, bucket: str,
@@ -251,20 +284,30 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
                     'Metadata': {'sha256':op['local_sha256']},
                 })
             after=_r2_head(client,bucket,key)
-            if after is None or after.get('ContentLength')!=op['local_bytes'] or \
-                    _remote_sha(client,bucket,key,after)!=op['local_sha256']:
-                raise RuntimeError(f'Upload verification failed: {key}')
-            audit['files'].append({'key':key,'status':op['action'],'bytes':op['local_bytes'],
-                                   'etag':str(after.get('ETag','')).strip('"')})
+            verified = _verify_artwork(client, bucket, op, after, stop)
+            audit['files'].append({'key':key,'status':op['action'], **verified})
             audit.pop('overwrite_in_progress', None)
             save()
             if index%30==0 or index==len(operations):
                 log(f'Verified R2 {index}/{len(operations)} objects')
         log('All R2 objects verified. Committing catalogue transaction...')
+        # Only independently verified records can supply commit evidence.
+        by_key = {record['key']: record for record in audit['files']}
+        commit_items = []
+        for item in plan['items']:
+            expected = dict(item)
+            for field in ('front', 'rear', 'production', 'svg'):
+                verified = by_key[item[field + '_key']]
+                expected[field + '_size'] = verified['bytes']
+                expected[field + '_sha256'] = verified['sha256']
+                expected[field + '_etag'] = verified['etag']
+            commit_items.append(expected)
+        if stop.is_set():
+            raise RuntimeError('Stopped before commit; database publication not attempted.')
         result=_api(endpoint,token,{
             'mode':'commit','dataset_id':DATASET,
             'release_mode':plan['mode'],'operation_id':plan['operation_id'],
-            'confirmation':'PUBLISH HELD HEBDEN BRIDGE V2','items':plan['items'],
+            'confirmation':'PUBLISH HELD HEBDEN BRIDGE V2','items':commit_items,
         },timeout=180)
         audit['database_result']=result
         audit['complete']=result.get('db_result',{}).get('status') in ('published','already_published')
