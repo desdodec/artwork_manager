@@ -1,0 +1,4 @@
+project_id = "ngmdsmmvdnbnxeozpfej"
+
+[functions.street-face-publish-v2]
+verify_jwt = false
