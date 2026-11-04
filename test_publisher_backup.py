@@ -165,6 +165,10 @@ class PublishRecoveryTests(unittest.TestCase):
             "operation_id": "00000000-0000-4000-8000-000000000002",
             "mode": "complete", "operations": self.operations, "items": [],
         }
+        self.plan['ownership'] = {key: {} for key in self.keys}
+        ownership_patch = patch('publisher.ownership_for', return_value=self.plan['ownership'])
+        ownership_patch.start()
+        self.addCleanup(ownership_patch.stop)
         self.api_calls = []
 
     def fake_api(self, endpoint, token, body, timeout=35):
@@ -200,7 +204,7 @@ class PublishRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "simulated upload failure"):
                 self.run_publish()
         a = self.assert_backups_intact()
-        self.assertEqual(self.api_calls, ["preflight"])
+        self.assertTrue(self.api_calls and set(self.api_calls) == {"preflight"})
         self.assertFalse(a["complete"])
         self.assertEqual({r["original_key"] for r in a["restore_needed"]},
                          set(self.keys))
@@ -215,7 +219,7 @@ class PublishRecoveryTests(unittest.TestCase):
         a = self.assert_backups_intact()
         self.assertEqual(a["overwrite_in_progress"]["original_key"], self.keys[0])
         self.assertEqual(a["files"], [])
-        self.assertEqual(self.api_calls, ["preflight"])
+        self.assertTrue(self.api_calls and set(self.api_calls) == {"preflight"})
         # Crash recovery must inspect overwrite_in_progress even without restore_needed.
         self.assertNotIn("restore_needed", a)
 
@@ -229,7 +233,7 @@ class PublishRecoveryTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "transaction rejected"):
                 self.run_publish()
         a = self.assert_backups_intact()
-        self.assertEqual(self.api_calls, ["preflight", "commit"])
+        self.assertEqual(self.api_calls, ["preflight"] * 6 + ["commit"])
         self.assertFalse(a["complete"])
         self.assertEqual(len(a["files"]), 2)
         self.assertEqual({r["original_key"] for r in a["restore_needed"]},

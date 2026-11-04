@@ -62,7 +62,7 @@ class PublicationFailureAuditTests(backup_tests.PublishRecoveryTests):
         self.assertEqual(set(assessment["potentially_changed_keys"]), set(self.keys))
         self.assertEqual(assessment["missing_backup_keys"], [])
         self.assertFalse(assessment["remote_verified_now"])
-        self.assertEqual(self.api_calls, ["preflight"])
+        self.assertTrue(self.api_calls and set(self.api_calls) == {"preflight"})
 
     def test_abrupt_crash_is_detected_even_without_restore_needed(self):
         self.r2.crash_at = 1
@@ -91,7 +91,7 @@ class PublicationFailureAuditTests(backup_tests.PublishRecoveryTests):
         self.assertEqual(assessment["completed_replacements"], 2)
         self.assertIsNone(assessment["interrupted_replacement"])
         self.assertEqual(assessment["missing_backup_keys"], [])
-        self.assertEqual(self.api_calls, ["preflight", "commit"])
+        self.assertEqual(self.api_calls, ["preflight"] * 6 + ["commit"])
 
     def test_corrupt_backup_prevents_any_original_upload(self):
         self.r2.corrupt_copies = True

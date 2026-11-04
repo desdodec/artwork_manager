@@ -4,13 +4,13 @@ import {readFileSync} from 'node:fs';
 import {loadDesktopObjects, send} from './edge_artwork.test.mjs';
 
 const fixture=JSON.parse(readFileSync(process.argv[2],'utf8'));
-const fields={front:'front_mockup',rear:'rear_mockup',production:'production_png',svg:'production_svg'};
+const fields={front:'front_mockup',rear:'rear_mockup',production:'production_png'};
 
-test('actual desktop payload preserves eight distinct artwork records across permanent identities',async()=>{
+test('actual desktop payload preserves six distinct artwork records across permanent identities',async()=>{
   const state=loadDesktopObjects(fixture.objects);
   const result=await send(fixture.payload);
   assert.equal(result.status,200,JSON.stringify(result.body));
-  assert.equal(result.body.verified_objects,8);
+  assert.equal(result.body.verified_objects,6);
   assert.equal(state.commits.length,1);
   const items=state.commits[0].args.p_items;
   assert.deepEqual(items,fixture.payload.items);
@@ -24,7 +24,7 @@ test('actual desktop payload preserves eight distinct artwork records across per
     assert.equal(item[field+'_sha256'],evidence.Metadata.sha256);
   }
   for(const suffix of ['key','size','etag','sha256'])
-    assert.equal(new Set(items.flatMap(item=>Object.keys(fields).map(field=>item[field+'_'+suffix]))).size,8);
+    assert.equal(new Set(items.flatMap(item=>Object.keys(fields).map(field=>item[field+'_'+suffix]))).size,6);
 });
 
 for(const item of fixture.payload.items) for(const field of Object.keys(fields))

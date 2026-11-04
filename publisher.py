@@ -19,9 +19,12 @@ from urllib.request import Request, urlopen
 from urllib.error import HTTPError, URLError
 from botocore.exceptions import ClientError
 
+MAX_PUBLISH_DESIGNS = 1000
 DATASET = 'street-face/hebden-bridge/v2'
 DEFAULT_ENDPOINT = 'https://ngmdsmmvdnbnxeozpfej.supabase.co/functions/v1/street-face-publish-v2'
-SLOTS = ('front_mockup', 'rear_mockup', 'production_png', 'production_svg')
+LOCAL_SLOTS = ('front_mockup', 'rear_mockup', 'production_png', 'production_svg')
+SLOTS = LOCAL_SLOTS[:3]
+ROLES = dict(zip(('front', 'rear', 'production'), SLOTS))
 
 
 def _api(endpoint: str, token: str, body: dict, timeout: int = 35) -> dict:
@@ -31,7 +34,10 @@ def _api(endpoint: str, token: str, body: dict, timeout: int = 35) -> dict:
     }, method='POST')
     try:
         with urlopen(request, timeout=timeout) as response:
-            return json.loads(response.read().decode('utf-8'))
+            raw = response.read(8388609)
+            if len(raw) > 8388608:
+                raise RuntimeError('Ownership response limit exceeded; uploads blocked')
+            return json.loads(raw.decode('utf-8'))
     except HTTPError as error:
         detail = error.read(3000).decode('utf-8', errors='replace')
         raise RuntimeError(f'Publish API HTTP {error.code}: {detail}') from None
@@ -101,8 +107,51 @@ def _verify_artwork(client, bucket, op, head, stop):
     return {'bytes': size, 'sha256': digest.hexdigest(), 'etag': etag}
 
 
+def ownership_for(items, server):
+    """Require all snapshot rows and one exact valid owner for each selected PNG."""
+    if server.get('ownership_snapshot_version') != 1 or server.get('ownership_complete') is not True or not isinstance(server.get('png_ownership'), list):
+        raise RuntimeError('PNG ownership inventory is missing or incomplete')
+    if len(server['png_ownership']) > 6000:
+        raise RuntimeError('Ownership snapshot limit exceeded; uploads blocked')
+    owners = {}
+    for row in server['png_ownership']:
+        if not isinstance(row, dict) or not isinstance(row.get('key'), str) or not row['key']:
+            raise RuntimeError('Malformed PNG ownership assignment')
+        owners.setdefault(row['key'], []).append(row)
+    selected = {}
+    identities = {}
+    for item in items:
+        for role in ROLES:
+            key = item[role + '_key']
+            folder = 'mockups/' if role in ('front', 'rear') else 'print_candidates/'
+            if not isinstance(key, str) or not key.startswith(DATASET + '/' + folder) or not key.endswith('.png') or '..' in key or '\\' in key:
+                raise RuntimeError(f'Unsafe PNG destination: {key}')
+            matches = owners.get(key, [])
+            if key in selected or len(matches) != 1:
+                raise RuntimeError(f'PNG destination collision or missing ownership: {key}')
+            owner = matches[0]
+            if any(not isinstance(owner.get(k), str) or not owner[k].strip() for k in
+                   ('dataset_id', 'street_key', 'design_id', 'asset_id', 'role', 'product_sku', 'status')) or type(owner.get('version')) is not int:
+                raise RuntimeError('Malformed selected PNG ownership assignment')
+            if (owner['dataset_id'], owner['street_key'], owner['role'], owner['product_sku'],
+                    owner['version'], owner['status']) != (DATASET, item['street_key'], role, 'GLOBAL-MUG-W', 1, 'hold'):
+                raise RuntimeError(f'PNG destination has a different owner or asset role: {key}')
+            identity = (owner['design_id'], owner['asset_id'])
+            if item['street_key'] in identities and identities[item['street_key']] != identity:
+                raise RuntimeError('Conflicting selected permanent identity or asset assignment')
+            identities[item['street_key']] = identity
+            selected[key] = dict(owner)
+    return selected
+
+
 def prepare(release, mapped: list[dict], geo: dict, client, bucket: str,
-            endpoint: str, token: str, mode: str, report_dir: Path, log, stop) -> dict:
+            endpoint: str, token: str, mode: str, report_dir: Path, log, stop,
+            *, upload_only: bool = False) -> dict:
+    # This is a request limit, independent of the full ownership inventory.
+    if not upload_only and len(mapped) > MAX_PUBLISH_DESIGNS:
+        raise ValueError(
+            f'Publish Collection allows at most {MAX_PUBLISH_DESIGNS:,} selected designs per request; '
+            f'{len(mapped):,} selected. Select fewer designs and prepare again.')
     if mode not in ('complete', 'partial'):
         raise ValueError('Choose complete or partial update explicitly')
     if release.issues or not mapped or len(mapped) != len(release.rows):
@@ -127,6 +176,9 @@ def prepare(release, mapped: list[dict], geo: dict, client, bucket: str,
         feature = by_key.get(key)
         if not feature or not feature.get('geometry'):
             raise RuntimeError(f'Missing geometry for {key}')
+        for slot in LOCAL_SLOTS:
+            if row.get(slot) not in by_object:
+                raise RuntimeError(f'Missing local source asset: {slot} for {key}')
         asset_keys = {slot: row[slot] for slot in SLOTS}
         for key_in_bucket in asset_keys.values():
             if key_in_bucket in file_keys:
@@ -141,8 +193,13 @@ def prepare(release, mapped: list[dict], geo: dict, client, bucket: str,
             'front_key': asset_keys['front_mockup'],
             'rear_key': asset_keys['rear_mockup'],
             'production_key': asset_keys['production_png'],
-            'svg_key': asset_keys['production_svg'],
         })
+    if {key for key in by_object if key.endswith('.png')} != file_keys:
+        raise RuntimeError('Unexplained PNG keys in local publication files')
+    ownership = ownership_for(items, server)
+    for warning in server.get('ownership_warnings', []):
+        log('Ownership warning: ' + str(warning))
+    by_object = {item[role + '_key']: by_object[item[role + '_key']] for item in items for role in ROLES}
     for index, (key, source) in enumerate(by_object.items(), 1):
         if stop.is_set():
             raise RuntimeError('Cancelled before publishing')
@@ -167,7 +224,7 @@ def prepare(release, mapped: list[dict], geo: dict, client, bucket: str,
         'design_count': len(items), 'object_count': len(operations),
         'summary': dict(Counter(o['action'] for o in operations)),
         'listed_before': len(listed_keys), 'excluded_keys': excluded,
-        'items': items, 'operations': operations,
+        'items': items, 'operations': operations, 'ownership': ownership,
         'warning': 'A complete release unlists every previously listed street not included. '
                    'In-place overwrites are safe only while all designs are held and have no checkout orders.',
     }
@@ -183,12 +240,14 @@ def prepare(release, mapped: list[dict], geo: dict, client, bucket: str,
     return plan
 
 
-def _backup_existing_objects(plan: dict, client, bucket: str, audit: dict, save, log, stop):
+def _backup_existing_objects(plan: dict, client, bucket: str, audit: dict, save, log, stop, recheck=None):
     """Create and verify a full recoverable snapshot before any in-place overwrite.
 
     Backups are retained in R2. A failure during this phase aborts publication;
     no production keys are modified. The local audit maps each source to its backup.
     """
+    if any(not op['key'].endswith('.png') for op in plan['operations']):
+        raise RuntimeError('Publication backups accept only PNG destinations')
     changes = [op for op in plan['operations'] if op['action'] == 'REPLACE']
     audit['backup_state'] = 'in_progress'
     audit['backup_total'] = len(changes)
@@ -206,6 +265,10 @@ def _backup_existing_objects(plan: dict, client, bucket: str, audit: dict, save,
             raise RuntimeError(f'Original R2 object changed before backup: {source_key}')
         if _r2_head(client, bucket, backup_key) is not None:
             raise RuntimeError(f'Backup destination unexpectedly exists: {backup_key}')
+        if recheck:
+            recheck()
+        if stop.is_set():
+            raise RuntimeError('Stopped during backup. No production object was overwritten.')
         client.copy_object(Bucket=bucket, Key=backup_key,
                            CopySource={'Bucket': bucket, 'Key': source_key})
         copied = _r2_head(client, bucket, backup_key)
@@ -235,13 +298,39 @@ def _backup_existing_objects(plan: dict, client, bucket: str, audit: dict, save,
 
 
 def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
-            report_dir: Path, log, stop) -> dict:
+            report_dir: Path, log, stop, progress=None) -> dict:
+    return _run_artwork(plan, client, bucket, endpoint, token, report_dir, log, stop,
+                        commit_catalogue=True, progress=progress)
+
+
+def upload_artwork_only(plan: dict, client, bucket: str, endpoint: str, token: str,
+                        report_dir: Path, log, stop, progress=None) -> dict:
+    """Upload and verify artwork; the shared runner exits before catalogue commit."""
+    return _run_artwork(plan, client, bucket, endpoint, token, report_dir, log, stop,
+                        commit_catalogue=False, progress=progress)
+
+
+def _run_artwork(plan, client, bucket, endpoint, token, report_dir, log, stop,
+                 *, commit_catalogue, progress=None):
+    if commit_catalogue and len(plan['items']) > MAX_PUBLISH_DESIGNS:
+        raise ValueError(
+            f'Publish Collection allows at most {MAX_PUBLISH_DESIGNS:,} selected designs per request; '
+            f'{len(plan["items"]):,} selected. Select fewer designs and prepare again.')
     # The user has already confirmed the exact plan in the graphical interface.
     # Recheck held/zero-orders immediately BEFORE any R2 overwrite.
-    guard = _api(endpoint, token, {'mode':'preflight','dataset_id':DATASET})
-    if not guard.get('safe_to_upload'):
-        raise RuntimeError('Pre-upload safety check failed. No upload performed.')
+    def recheck():
+        guard = _api(endpoint, token, {'mode':'preflight','dataset_id':DATASET})
+        if not guard.get('safe_to_upload'):
+            raise RuntimeError('Pre-upload safety check failed. No subsequent upload performed.')
+        if ownership_for(plan['items'], guard) != plan.get('ownership'):
+            raise RuntimeError('PNG ownership changed since preview. Prepare a fresh plan.')
+    recheck()
     operations=plan['operations']
+    expected = set(plan['ownership'])
+    if len(operations) != len(expected) or {op['key'] for op in operations} != expected:
+        raise RuntimeError('Unexplained publication object keys; prepare a fresh plan.')
+    if any(not op['key'].endswith('.png') for op in operations):
+        raise RuntimeError('Only PNG publication destinations are permitted')
     started = datetime.now(timezone.utc).isoformat()
     audit={'operation_id':plan['operation_id'],'started_utc':started,
            'complete':False,'files':[],'backups':[], 'backup_state':'not_started',
@@ -255,9 +344,15 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
             stream.flush()
             os.fsync(stream.fileno())
         os.replace(temporary, audit_file)
+    counts = {'uploaded': 0, 'skipped': 0, 'failed': 0, 'verified': 0}
+    audit['action'] = 'publish' if commit_catalogue else 'upload_artwork_only'
+    audit['counts'] = counts
     save()
     try:
-        _backup_existing_objects(plan, client, bucket, audit, save, log, stop)
+        if progress:
+            progress(0, len(operations))
+        _backup_existing_objects(plan, client, bucket, audit, save, log, stop, recheck)
+        recheck()
         for index, op in enumerate(operations,1):
             if stop.is_set():
                 raise RuntimeError('Stopped; database publication not attempted. Some uploads may exist.')
@@ -279,24 +374,44 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
                                                    'backup_key': backup['backup_key']}
                 save()
             if op['action']!='SAME':
+                audit['upload_in_progress'] = {'key': key, 'action': op['action'], 'outcome': 'unknown until verified'}
+                save()
+                recheck()
+                if stop.is_set():
+                    raise RuntimeError('Stopped before upload; no subsequent write initiated.')
                 client.upload_file(str(source),bucket,key,ExtraArgs={
-                    'ContentType': 'image/svg+xml' if source.suffix.lower()=='.svg' else 'image/png',
+                    'ContentType': 'image/png',
                     'Metadata': {'sha256':op['local_sha256']},
                 })
+                counts['uploaded'] += 1
+            else:
+                counts['skipped'] += 1
+                log(f'Skipped upload (identical in preview; verifying bytes): {key}')
             after=_r2_head(client,bucket,key)
             verified = _verify_artwork(client, bucket, op, after, stop)
             audit['files'].append({'key':key,'status':op['action'], **verified})
+            counts['verified'] += 1
             audit.pop('overwrite_in_progress', None)
+            audit.pop('upload_in_progress', None)
             save()
+            if progress:
+                progress(index, len(operations))
             if index%30==0 or index==len(operations):
                 log(f'Verified R2 {index}/{len(operations)} objects')
+        if not commit_catalogue:
+            if stop.is_set():
+                raise RuntimeError('Stopped after artwork verification; database publication not attempted.')
+            audit['artwork_complete'] = True
+            save()
+            log(f"Artwork upload finished: {counts}. No Supabase catalogue changes requested.")
+            return dict(counts)
         log('All R2 objects verified. Committing catalogue transaction...')
         # Only independently verified records can supply commit evidence.
         by_key = {record['key']: record for record in audit['files']}
         commit_items = []
         for item in plan['items']:
             expected = dict(item)
-            for field in ('front', 'rear', 'production', 'svg'):
+            for field in ('front', 'rear', 'production'):
                 verified = by_key[item[field + '_key']]
                 expected[field + '_size'] = verified['bytes']
                 expected[field + '_sha256'] = verified['sha256']
@@ -317,6 +432,12 @@ def publish(plan: dict, client, bucket: str, endpoint: str, token: str,
         log('PUBLISHED to read-only collection inventory. Checkout and Prodigi remain blocked.')
         return result
     except Exception:
+        counts['failed'] += 1
+        if audit.get('upload_in_progress'):
+            log(f"Remote write may have succeeded; outcome unverified: {audit['upload_in_progress']['key']}")
+        log(f"Artwork operation failed: {counts}; "
+            f"{len(operations) - counts['verified']} files remain unverified. "
+            f"Recovery journal: {audit_file}. Retry with a fresh preview.")
         # Restore requirements are explicit: only completed overwrites need recovery.
         # Never auto-restore while a concurrent writer might be active.
         audit['restore_needed'] = [

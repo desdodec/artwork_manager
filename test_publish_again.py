@@ -4,6 +4,7 @@ Offline only. Uses a four-file, one-design collection, simulated R2 and mocked
 Supabase. No production upload, database change, or external network request.
 """
 from __future__ import annotations
+from offline_ownership_fixtures import preflight
 
 import json
 import tempfile
@@ -59,7 +60,7 @@ class PublishAgainTests(unittest.TestCase):
     def fake_api(self, endpoint, token, body, timeout=35):
         self.api_calls.append(body["mode"])
         if body["mode"] == "preflight":
-            return {"safe_to_upload": True, "currently_listed_keys": []}
+            return preflight(self.mapped, currently_listed_keys=[])
         return {"db_result": {"status": "published"}}
 
     def preview(self):
@@ -78,7 +79,7 @@ class PublishAgainTests(unittest.TestCase):
     def test_reopen_folder_and_publish_again_finishes_remaining_files(self):
         with patch("publisher._api", side_effect=self.fake_api):
             first_plan = self.preview()
-            self.assertEqual(first_plan["summary"], {"REPLACE": 4})
+            self.assertEqual(first_plan["summary"], {"REPLACE": 3})
             self.r2.fail_at = 2  # Second remote object mutates before error.
             with self.assertRaisesRegex(RuntimeError, "simulated upload failure"):
                 self.do_publish(first_plan)
@@ -92,22 +93,22 @@ class PublishAgainTests(unittest.TestCase):
             retry_plan = self.preview()
             self.assertNotEqual(first_plan["operation_id"], retry_plan["operation_id"])
             self.assertEqual(Counter(op["action"] for op in retry_plan["operations"]),
-                             {"SAME": 2, "REPLACE": 2})
-            self.assertEqual(retry_plan["summary"], {"SAME": 2, "REPLACE": 2})
+                             {"SAME": 2, "REPLACE": 1})
+            self.assertEqual(retry_plan["summary"], {"SAME": 2, "REPLACE": 1})
 
             self.r2.fail_at = None
             self.r2.uploads.clear()
             result = self.do_publish(retry_plan)
             self.assertEqual(result["db_result"]["status"], "published")
-            self.assertEqual(self.r2.uploads, self.keys[2:])
+            self.assertEqual(self.r2.uploads, self.keys[2:3])
             self.assertEqual(self.api_calls.count("commit"), 1)
-            for i, key in enumerate(self.keys):
+            for i, key in enumerate(self.keys[:3]):
                 self.assertEqual(self.r2.objects[key], self.updated[i])
             retry_audit = json.loads((self.report /
                 ("publication_run_" + retry_plan["operation_id"] + ".json")
             ).read_text(encoding="utf-8"))
             self.assertTrue(retry_audit["complete"])
-            self.assertEqual(len(retry_audit["backups"]), 2)
+            self.assertEqual(len(retry_audit["backups"]), 1)
 
     def test_after_success_a_fresh_preview_skips_all_uploads(self):
         with patch("publisher._api", side_effect=self.fake_api):
@@ -115,7 +116,7 @@ class PublishAgainTests(unittest.TestCase):
             self.do_publish(plan)
             self.r2.uploads.clear()
             another = self.preview()
-            self.assertEqual(another["summary"], {"SAME": 4})
+            self.assertEqual(another["summary"], {"SAME": 3})
             # Even running Publish again should perform no artwork upload.
             self.do_publish(another)
             self.assertEqual(self.r2.uploads, [])

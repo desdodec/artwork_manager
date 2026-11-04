@@ -69,6 +69,25 @@ def assess_recovery(audit_path: Path) -> dict:
         else:
             concerns.append("Malformed interrupted-overwrite entry")
 
+    uncertain_new = set()
+    uncertain_replacements = set()
+    uncertain_unknown = set()
+    upload = data.get("upload_in_progress")
+    if upload is not None:
+        if not isinstance(upload, dict) or not isinstance(upload.get("key"), str):
+            concerns.append("Malformed interrupted-upload entry; remote outcome unknown")
+        else:
+            key = upload["key"]
+            action = upload.get("action")
+            if action == "REPLACE" or key == interrupted_key or key in backup_by_original:
+                uncertain_replacements.add(key)
+                potential.add(key)
+            elif action == "NEW":
+                uncertain_new.add(key)
+            else:
+                uncertain_unknown.add(key)
+                concerns.append("Interrupted upload type unknown: " + key)
+
     # A save or process can fail after an overwrite and before its final journal
     # update. Without a definitive remote state, completed backups are all
     # considered potentially affected, not automatically safe to restore.
@@ -92,10 +111,14 @@ def assess_recovery(audit_path: Path) -> dict:
     if isinstance(reported_total, int) and reported_total != len(backups) and data.get("backup_state") == "complete":
         concerns.append("Full backup count does not match verified backup records")
 
-    if data.get("complete"):
+    artwork_only = data.get("action") == "upload_artwork_only"
+    if artwork_only and data.get("artwork_complete"):
+        state = "artwork_upload_reported"
+        advice = "Audit reports artwork upload only; no catalogue publication was requested. Verify current remote state independently."
+    elif data.get("complete"):
         state = "published_reported"
         advice = "Audit reports successful database publication; do not restore without independent catalogue and R2 verification."
-    elif potential or new_objects:
+    elif potential or new_objects or upload is not None:
         state = "manual_reconciliation_required"
         advice = "Audit indicates potential R2 modifications; verify actual R2 and Supabase state before any manual restoration."
     elif data.get("backup_state") == "complete":
@@ -109,12 +132,16 @@ def assess_recovery(audit_path: Path) -> dict:
         "operation_id": operation_id,
         "audit_file": str(path),
         "state": state,
-        "publication_complete_reported": bool(data.get("complete")),
+        "publication_complete_reported": bool(data.get("complete")) and not artwork_only,
         "backup_state": data.get("backup_state", "unknown"),
         "backups_recorded": len(backups),
         "backups_expected": reported_total,
         "completed_replacements": len(completed),
         "interrupted_replacement": interrupted_key,
+        "artwork_upload_complete_reported": artwork_only and bool(data.get("artwork_complete")),
+        "uncertain_new_keys": sorted(uncertain_new),
+        "uncertain_replacement_keys": sorted(uncertain_replacements),
+        "uncertain_upload_keys": sorted(uncertain_unknown),
         "new_objects_recorded": len(new_objects),
         "potentially_changed_keys": sorted(potential),
         "missing_backup_keys": missing,
@@ -137,6 +164,9 @@ def format_assessment(result: dict) -> str:
         "New objects recorded: " + str(result["new_objects_recorded"]),
         "Potentially changed objects: " + str(len(result["potentially_changed_keys"])),
         "Potentially changed objects without backup record: " + str(len(result["missing_backup_keys"])),
+        "Uncertain NEW uploads: " + str(result["uncertain_new_keys"]),
+        "Uncertain replacements: " + str(result["uncertain_replacement_keys"]),
+        "Uncertain uploads of unknown type: " + str(result["uncertain_upload_keys"]),
         "Current R2 backup existence/integrity: NOT CHECKED",
         "Current Supabase publication status: NOT CHECKED",
         result["advice"],

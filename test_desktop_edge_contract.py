@@ -1,3 +1,4 @@
+from offline_ownership_fixtures import preflight
 """Offline desktop-to-real-Edge contract; no credentials or SDK connections."""
 import hashlib
 import io
@@ -25,7 +26,7 @@ class DesktopEdgeContractTests(unittest.TestCase):
                 features.append({'properties': {'street_key': row['street_key']},
                                  'geometry': {'type': 'LineString',
                                               'coordinates': [[0, 0], [1, identity]]}})
-                for index, slot in enumerate(publisher.SLOTS):
+                for index, slot in enumerate(publisher.LOCAL_SLOTS):
                     number = identity * 10 + index
                     svg = slot == 'production_svg'
                     path = folder / f'{number}.{"svg" if svg else "png"}'
@@ -64,7 +65,7 @@ class DesktopEdgeContractTests(unittest.TestCase):
                 if body['mode'] == 'commit':
                     captured.append(json.loads(json.dumps(body)))
                     return {'db_result': {'status': 'published'}}
-                return {'safe_to_upload': True, 'currently_listed_keys': []}
+                return preflight(rows, currently_listed_keys=[])
 
             r2 = MemoryR2()
             release = SimpleNamespace(rows=rows, issues=[], files=files, prefix=publisher.DATASET)

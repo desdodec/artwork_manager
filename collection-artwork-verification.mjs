@@ -8,8 +8,8 @@ export async function verifyArtwork(checks, headObject) {
       const size = item[field + '_size'];
       const sha = item[field + '_sha256'];
       const etag = item[field + '_etag'];
-      // PNG minimum matches SQL; retain SVG's existing 100-byte minimum.
-      if (!Number.isSafeInteger(size) || size < (field === 'svg' ? 100 : 1000) ||
+      // Three PNGs; the SVG remains local.
+      if (!Number.isSafeInteger(size) || size < 1000 ||
           typeof sha !== 'string' || !/^[0-9a-f]{64}$/.test(sha) ||
           typeof etag !== 'string' || !/^[A-Za-z0-9_-]{8,128}$/.test(etag))
         return fail('Invalid expected artwork size, SHA-256 or ETag');
